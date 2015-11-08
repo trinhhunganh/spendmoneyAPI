@@ -1,70 +1,37 @@
 <?php
-
 use Phalcon\Loader;
 use Phalcon\Mvc\Micro;
 use Phalcon\DI\FactoryDefault;
-use Phalcon\Db\Adapter\Pdo\Mysql as PdoMysql;
-use Phalcon\Db\Adapter\Pdo\Postgresql as PdoPostgresql;
-use Phalcon\Db\Adapter\Pdo\Sqlite as PdoSqlite;
-use Phalcon\Db\Adapter\Pdo\Oracle as PdoOracle;
+
 use Phalcon\Http\Response;
 use Phalcon\Config;
 include('Mail.php');
 
-// API Error handler
-function throw_error($status, $message)
-{
-	$response = new Response();
-	$response->setJsonContent(
-        array(
-            $status => $message
-        )
-    );
-    return $response;
-}
+// Use Loader() to autoload our models and API controllers
+$loader = new Loader();
+$loader->registerNamespaces(
+	array(
+   		'API' => __DIR__ . '/api/'
+	), true
+);
+$loader->registerDirs(
+    array(
+        __DIR__ . '/models/'
+    )
+);
 
-// API Authenticate request
-function checkAuthenticationID($auth_id)
-{
-	if( is_null($auth_id) || $auth_id != 'TASK24H-TEST' )
-    {
-    	return false;
-    }
-    return true;
-}
+$loader->register();
+// Initialize error handler
+$error_handler = new API\Error_handler();
 
-// Adapter handler
-function getDBAdapter($configuration)
-{
-	$adapter = $configuration->database->adapter;
-	switch ($adapter) {
-		case 'mysql':
-			return new PdoMysql(
-		        (array)$configuration->database->config_params
-		    );
-			break;
-		case 'postgresql':
-			return new PdoPostgresql(
-		        (array)$configuration->database->config_params
-		    );
-			break;
-		case 'sqlite':
-			return new PdoSqlite(
-		        (array)$configuration->database->config_params
-		    );
-			break;
-		case 'oracle':
-			return new PdoOracle(
-		        (array)$configuration->database->config_params
-		    );
-			break;	
-		default:
-			return new PdoMysql(
-		        (array)$configuration->database->config_params
-		    );
-			break;
-	}
-}
+// Initialize authentication handler
+$authentication_handler = new API\Authentication_handler();
+
+// Initialize DB Adapter
+$database_adapter =  new API\Database_adapter();
+
+// Initialize API controller
+$api_controller = new API\Spendmoneyapi();
 
 // Load configuration file
 require "config.php";
@@ -78,20 +45,11 @@ $headers["Content-type"] = $config->mail->content_type;
 // Create the mail object using the Mail::factory method 
 $mail_object = Mail::factory("smtp", $config->mail->system_mail_params);
 
-// Use Loader() to autoload our model
-$loader = new Loader();
-
-$loader->registerDirs(
-    array(
-        __DIR__ . '/models/'
-    )
-)->register();
-
 $di = new FactoryDefault();
 
 // Set up the database service
-$di->set('db', function () use ($config) {
-    return getDBAdapter($config);
+$di->set('db', function () use ($config, $database_adapter) {
+    return $database_adapter->getDBAdapter($config);
 });
 
 // Create and bind the DI to the application
@@ -99,182 +57,34 @@ $app = new Micro($di);
 
 // Define the routes here
 // Retrieve account info
-$app->get('/account/{id:[0-9]+}', function ($id) use ($app) {
+$app->get('/account/{id:[0-9]+}', function ($id) use ($app, $api_controller, $error_handler, $authentication_handler) {
 	$auth_id = isset($_GET['auth_id']) ? $_GET['auth_id'] : null;
    	
-   	if(!checkAuthenticationID($auth_id))
-   		return throw_error("ERROR", "FAILED TO AUTHENTICATE");
+   	if(!$authentication_handler->checkAuthenticationID($auth_id))
+   		return $error_handler->throw_error("ERROR", "FAILED TO AUTHENTICATE");
 
-   	// Create a response
-    $response = new Response();
-
-	$phql = "SELECT accountName, accountNumber, currentBalance, email FROM account WHERE id = :id:";
-    $account = $app->modelsManager->executeQuery(
-    	$phql, 
-    	array(
-    		'id' => $id
-		)
-	)->getFirst();
-    if ($account == false) 
-    {
-        return throw_error( "STATUS", "ACCOUNT NOT FOUND" );
-    } 
-    else
-    {
-        $response->setJsonContent(
-            array(
-                'STATUS' => 'ACCOUNT FOUND',
-                'DATA'   => array(
-                    'NAME'   => $account->accountName,
-                    'NUMBER' => $account->accountNumber,
-                    'CURRENT_BALANCE' => $account->currentBalance,
-                    'EMAIL' => $account->email
-                )
-            )
-        );
-    }
-	return $response;
+   	return $api_controller->getAccountById($id, $app, $error_handler);
 });
 
 // Retrieve account balance
-$app->get('/account/{id:[0-9]+}/balance', function ($id) use ($app) {
+$app->get('/account/{id:[0-9]+}/balance', function ($id) use ($app, $api_controller, $error_handler, $authentication_handler) {
 	$auth_id = isset($_GET['auth_id']) ? $_GET['auth_id'] : null;
 	
-   	if(!checkAuthenticationID($auth_id))
-   		return throw_error("ERROR", "FAILED TO AUTHENTICATE");
+   	if(!$authentication_handler->checkAuthenticationID($auth_id))
+   		return $error_handler->throw_error("ERROR", "FAILED TO AUTHENTICATE");
 
-   	// Create a response
-    $response = new Response();
-
-	$phql = "SELECT currentBalance FROM account WHERE id = :id:";
-    $account = $app->modelsManager->executeQuery(
-    	$phql, 
-    	array(
-    		'id' => $id
-		)
-	)->getFirst();
-
-    if ($account == false) 
-    {
-        return throw_error( "STATUS", "ACCOUNT NOT FOUND" );
-    } 
-    else
-    {
-        $response->setJsonContent(
-            array(
-                'STATUS' => 'ACCOUNT FOUND',
-                'DATA'   => array(
-                    'CURRENT_BALANCE' => $account->currentBalance,
-                )
-            )
-        );
-    }
-
-    return $response;
+   	return $api_controller->getAccountBalanceById($id, $app, $error_handler);
 });
 
 // Spend money from an account
-$app->put('/account/{id:[0-9]+}/spend', function ($id) use ($app, $mail_object, $headers) {
+$app->put('/account/{id:[0-9]+}/spend', function ($id) use ($app, $api_controller, $mail_object, $headers, $error_handler, $authentication_handler) {
 	$post_params = $app->request->getJsonRawBody();
 	$auth_id = isset($post_params->auth_id) ? $post_params->auth_id : null;
 	
-	if(!checkAuthenticationID($auth_id))
-   		return throw_error("ERROR", "FAILED TO AUTHENTICATE");
+	if(!$authentication_handler->checkAuthenticationID($auth_id))
+   		return $error_handler->throw_error("ERROR", "FAILED TO AUTHENTICATE");
 
-	// Create a response
-    $response = new Response();
-
-	$phql = "SELECT currentBalance, email FROM account WHERE id = :id:";
-    $account = $app->modelsManager->executeQuery(
-    	$phql, 
-    	array(
-    		'id' => $id
-		)
-	)->getFirst();
-    if ($account == false) 
-    {
-        return throw_error( "STATUS", "ACCOUNT NOT FOUND" );
-    } 
-    else
-    {
-        $spend_amount = isset($post_params->amount) ? intval($post_params->amount) : null;
-        if( is_null($spend_amount) || $spend_amount == 0)
-		{
-			return throw_error( "ERROR", "INVALID AMOUNT" );
-		}
-		else
-		{
-			//check if amount higher than current balance
-			if($spend_amount > $account->currentBalance)
-			{
-				return throw_error( "ERROR", "SPEND AMOUNT EXCEEDS CURRENT BALANCE" );
-			}
-			else
-			{
-				$phql = "UPDATE account SET currentBalance = :newbalance: WHERE id = :id:";
-			    $status = $app->modelsManager->executeQuery($phql, array(
-			        'id' => $id,
-			        'newbalance' => $account->currentBalance - $spend_amount
-			    ));
-
-			    //update database successfully
-			    if ($status->success() == true) 
-			    {
-			        $response->setJsonContent(
-			            array(
-			                'STATUS' => "SUCCESS"
-			            )
-			        );
-
-			        //send mail
-					$message = 'Your old balance is <b>' . $account->currentBalance . '</b><br>';
-					$message .= 'You have spent <b>' . $spend_amount . '</b> from your account<br>';
-					$message .= 'Your current balance is <b>' . ($account->currentBalance - $spend_amount) . '</b>';
-					$recipient = $account->email;
-					$headers["To"] = $account->email;
-					$mail_object->send($recipient, $headers, $message);
-					if (PEAR::isError($mail_object)) 
-					{
-					    $response->setJsonContent(
-				            array(
-				                'STATUS' => "SUCCESS",
-				                'SEND MAIL STATUS' => "FAIL"
-				            )
-			        	);
-					} 
-					else 
-					{
-					    $response->setJsonContent(
-				            array(
-				                'STATUS' => "SUCCESS",
-				                'SEND MAIL STATUS' => "SUCCESS"
-				            )
-			        	);
-					}
-					//
-			    } 
-			    else 
-			    {
-			        // Change the HTTP status
-			        $response->setStatusCode(409, "Conflict");
-
-			        $errors = array();
-			        foreach ($status->getMessages() as $message) {
-			            $errors[] = $message->getMessage();
-			        }
-
-			        $response->setJsonContent(
-			            array(
-			                'STATUS'   => 'ERROR',
-			                'MESSAGES' => $errors
-			            )
-			        );
-			        //
-			    }
-			}
-		}
-    }
-    return $response;
+	return $api_controller->spendMoneyFromAccount( $app, $id, $mail_object, $headers, $error_handler, $post_params );
 });
 
 $app->handle();
